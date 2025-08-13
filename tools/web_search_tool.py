@@ -1,52 +1,61 @@
 # tools/web_search_tool.py
-import requests
+import httpx
+import json
 from bs4 import BeautifulSoup
-from qwen_agent.tools.base import register_tool
+from qwen_agent.tools.base import BaseTool, register_tool
 
-# It's good practice to define the tool's name explicitly
-TOOL_NAME = "web_search"
-
-@register_tool(TOOL_NAME)
-def web_search(url: str):
+@register_tool("web_search")
+class WebSearch(BaseTool):
     """
-    Fetches the text content from a given URL.
-
-    Args:
-        url (str): The URL to fetch content from.
-
-    Returns:
-        A dictionary with the status and the extracted text content or an error message.
+    Fetches the text content from a given URL asynchronously.
     """
-    try:
-        print(f"Attempting to search URL: {url}")
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()  # Raise an exception for bad status codes (4xx or 5xx)
+    description = "Fetches the text content from a given URL."
+    parameters = [{
+        "name": "url",
+        "type": "string",
+        "description": "The URL to fetch content from.",
+        "required": True
+    }]
 
-        # Use BeautifulSoup to parse the HTML and extract text
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Remove script and style elements
-        for script_or_style in soup(["script", "style"]):
-            script_or_style.decompose()
+    async def call(self, params: str, **kwargs) -> str:
+        """
+        Fetches the text content from a given URL asynchronously.
 
-        # Get text and clean it up
-        text = soup.get_text()
-        lines = (line.strip() for line in text.splitlines())
-        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
-        text = '\n'.join(chunk for chunk in chunks if chunk)
+        Args:
+            params (str): A JSON string containing the 'url'.
 
-        # Truncate for brevity to avoid overwhelming the context window
-        max_length = 4000
-        if len(text) > max_length:
-            text = text[:max_length] + "\n... (content truncated)"
+        Returns:
+            A JSON string with the status and the extracted text content or an error message.
+        """
+        try:
+            params = json.loads(params)
+            url = params['url']
 
-        return {"status": "success", "content": text}
+            print(f"Attempting to search URL: {url}")
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, headers=headers, timeout=10)
+                response.raise_for_status()
 
-    except requests.RequestException as e:
-        return {"status": "error", "message": f"Failed to fetch URL: {e}"}
-    except Exception as e:
-        return {"status": "error", "message": f"An unexpected error occurred: {e}"}
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for script_or_style in soup(["script", "style"]):
+                script_or_style.decompose()
+
+            text = soup.get_text()
+            lines = (line.strip() for line in text.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            text = '\n'.join(chunk for chunk in chunks if chunk)
+
+            max_length = 4000
+            if len(text) > max_length:
+                text = text[:max_length] + "\n... (content truncated)"
+
+            return json.dumps({"status": "success", "content": text})
+
+        except httpx.RequestError as e:
+            return json.dumps({"status": "error", "message": f"Failed to fetch URL: {e}"})
+        except Exception as e:
+            return json.dumps({"status": "error", "message": f"An unexpected error occurred: {e}"})
 
