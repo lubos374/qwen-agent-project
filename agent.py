@@ -1,43 +1,90 @@
-# agent_v2.py
+# agent.py
 import os
+import json
+import httpx
+from bs4 import BeautifulSoup
+from datetime import datetime
 from qwen_agent.agents import Assistant
+from qwen_agent.tools.base import BaseTool, register_tool
+from config import LLM_CFG, TOOLS_LIST
 
-# Import your tool modules so registration runs
-import tools.time_tool  # noqa: F401
-import tools.web_search_tool # noqa: F401
-
-# --- LLM Configuration ---
-# Using your local Ollama setup
-llm_cfg = {
-    "model": "qwen3:1.7b",
-    "model_server": "http://localhost:11434/v1",
-    "api_key": "EMPTY",
-    "generate_cfg": {
-        "max_tokens": 1024, # Increased tokens for potentially larger RAG context
-        "temperature": 0.7,
-    }
-}
-
-# --- Tool Configuration ---
-# Add your new web_search tool to the list
-tools_list = ["get_time", "code_interpreter", "web_search"]
+@register_tool("get_time")
+class GetTime(BaseTool):
+    """Return current local time as ISO string."""
+    description = "Return current local time"
+    parameters = []
+    def call(self, params: str = None, **kwargs) -> str:
+        return json.dumps({"time": datetime.now().isoformat()})
 
 # --- RAG Configuration ---
-# Point to the directory containing your knowledge base files
-# Create a 'docs' folder in your project and add some .txt or .md files.
+
+@register_tool("web_search")
+class WebSearch(BaseTool):
+    """
+    Fetches the text content from a given URL asynchronously.
+    """
+    description = "Fetches the text content from a given URL."
+    parameters = [{
+        "name": "url",
+        "type": "string",
+        "description": "The URL to fetch content from.",
+        "required": True
+    }]
+
+    async def call(self, params: str, **kwargs) -> str:
+        """
+        Fetches the text content from a given URL asynchronously.
+
+        Args:
+            params (str): A JSON string containing the 'url'.
+
+        Returns:
+            A JSON string with the status and the extracted text content or an error message.
+        """
+        try:
+            params = json.loads(params)
+            url = params['url']
+
+            print(f"Attempting to search URL: {url}")
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, headers=headers, timeout=10)
+                response.raise_for_status()
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            for script_or_style in soup(["script", "style"]):
+                script_or_style.decompose()
+
+            text = soup.get_text()
+            lines = (line.strip() for line in text.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            text = '\n'.join(chunk for chunk in chunks if chunk)
+
+            max_length = 4000
+            if len(text) > max_length:
+                text = text[:max_length] + "\n... (content truncated)"
+
+            return json.dumps({"status": "success", "content": text})
+
+        except httpx.RequestError as e:
+            return json.dumps({"status": "error", "message": f"Failed to fetch URL: {e}"})
+        except Exception as e:
+            return json.dumps({"status": "error", "message": f"An unexpected error occurred: {e}"})
+
 DOCS_PATH = os.path.join(os.path.dirname(__file__), 'docs')
 if not os.path.exists(DOCS_PATH):
     os.makedirs(DOCS_PATH)
-    # Create a dummy file for demonstration if the folder is new
-    with open(os.path.join(DOCS_PATH, 'my_knowledge.txt'), 'w') as f:
-        f.write("Lubomir is the creator of this AI agent system. He is building an AI god.")
+
+doc_files = [os.path.join(DOCS_PATH, f) for f in os.listdir(DOCS_PATH) if os.path.isfile(os.path.join(DOCS_PATH, f))]
 
 # --- Agent Initialization ---
 # Initialize the assistant with the LLM, tools, and knowledge base
 bot = Assistant(
-    llm=llm_cfg,
-    function_list=tools_list,
-    knowledge_base={'source': DOCS_PATH}, # Enable RAG here
+    llm=LLM_CFG,
+    function_list=TOOLS_LIST,
+    files=doc_files,
     name="Lubomir-Upgraded-Agent",
     system_message=(
         "You are a helpful AI assistant. "
